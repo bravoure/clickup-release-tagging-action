@@ -10,15 +10,15 @@ async function getPreviousReleaseTag(octokit, owner, repo, currentTag) {
       repo,
       per_page: 100
     });
-    
+
     // Find the current release index
     const currentIndex = releases.findIndex(release => release.tag_name === currentTag);
-    
+
     if (currentIndex === -1 || currentIndex === releases.length - 1) {
       // If current tag not found or it's the last release, return null
       return null;
     }
-    
+
     // Return the next release in the list (which is the previous chronological release)
     return releases[currentIndex + 1].tag_name;
   } catch (error) {
@@ -36,7 +36,7 @@ async function getCommitsBetweenTags(octokit, owner, repo, baseTag, headTag) {
       base: baseTag,
       head: headTag
     });
-    
+
     return comparison.commits;
   } catch (error) {
     core.error(`Error comparing commits between tags: ${error.message}`);
@@ -52,26 +52,43 @@ async function getCommitsInRelease(octokit, owner, repo, tag) {
       repo,
       ref: `tags/${tag}`
     });
-    
+
     const { data: tagData } = await octokit.rest.git.getTag({
       owner,
       repo,
       tag_sha: refData.object.sha
     });
-    
+
     // If it's an annotated tag, get the commit it points to
     const commitSha = tagData.object.sha;
-    
+
     // Get the commit
     const { data: commit } = await octokit.rest.git.getCommit({
       owner,
       repo,
       commit_sha: commitSha
     });
-    
+
     return [commit];
   } catch (error) {
     core.error(`Error getting commits for tag ${tag}: ${error.message}`);
+    return [];
+  }
+}
+
+// Function to get commits in a branch
+async function getCommitsInBranch(octokit, owner, repo, branchName, maxCommits = 100) {
+  try {
+    const { data: commits } = await octokit.rest.repos.listCommits({
+      owner,
+      repo,
+      sha: branchName,
+      per_page: maxCommits
+    });
+
+    return commits;
+  } catch (error) {
+    core.error(`Error getting commits for branch ${branchName}: ${error.message}`);
     return [];
   }
 }
@@ -80,7 +97,7 @@ async function getCommitsInRelease(octokit, owner, repo, tag) {
 async function getMergedPRsFromCommits(octokit, owner, repo, commits) {
   const mergedPRs = [];
   const prRegex = /Merge pull request #(\d+)/;
-  
+
   for (const commit of commits) {
     const match = prRegex.exec(commit.commit.message);
     if (match && match[1]) {
@@ -91,7 +108,7 @@ async function getMergedPRsFromCommits(octokit, owner, repo, commits) {
           repo,
           pull_number: prNumber
         });
-        
+
         if (pr.merged) {
           mergedPRs.push(pr);
         }
@@ -100,41 +117,57 @@ async function getMergedPRsFromCommits(octokit, owner, repo, commits) {
       }
     }
   }
-  
+
   return mergedPRs;
 }
 
 // Main function to process a release and extract ClickUp task IDs
-async function processRelease(eventPayload, githubToken, includePreviousRelease) {
+async function processRelease(eventPayload, githubToken, includePreviousRelease, releaseName) {
   const octokit = github.getOctokit(githubToken);
   const owner = eventPayload.repository.owner.login;
   const repo = eventPayload.repository.name;
-  const releaseTag = eventPayload.release.tag_name;
-  
+  const context = github.context;
+
   let commits = [];
   let taskIds = [];
-  
-  if (includePreviousRelease) {
-    // Get the previous release tag
-    const previousTag = await getPreviousReleaseTag(octokit, owner, repo, releaseTag);
-    
-    if (previousTag) {
-      core.info(`Comparing commits between ${previousTag} and ${releaseTag}`);
-      // Get commits between the previous release and current release
-      commits = await getCommitsBetweenTags(octokit, owner, repo, previousTag, releaseTag);
+
+  // Determine if we're processing a branch or a release
+  const isBranch = context.eventName === 'push' && context.ref;
+
+  if (isBranch) {
+    // For branch pushes, get commits from the branch
+    core.info(`Getting commits for branch: ${releaseName}`);
+    commits = await getCommitsInBranch(octokit, owner, repo, releaseName);
+  } else if (eventPayload.release) {
+    // For releases
+    const releaseTag = eventPayload.release.tag_name;
+
+    if (includePreviousRelease) {
+      // Get the previous release tag
+      const previousTag = await getPreviousReleaseTag(octokit, owner, repo, releaseTag);
+
+      if (previousTag) {
+        core.info(`Comparing commits between ${previousTag} and ${releaseTag}`);
+        // Get commits between the previous release and current release
+        commits = await getCommitsBetweenTags(octokit, owner, repo, previousTag, releaseTag);
+      } else {
+        core.info(`No previous release found. Getting commits for ${releaseTag}`);
+        // If no previous release, just get the commits in this release
+        commits = await getCommitsInRelease(octokit, owner, repo, releaseTag);
+      }
     } else {
-      core.info(`No previous release found. Getting commits for ${releaseTag}`);
-      // If no previous release, just get the commits in this release
+      core.info(`Getting commits for ${releaseTag} only`);
+      // Just get the commits in this release
       commits = await getCommitsInRelease(octokit, owner, repo, releaseTag);
     }
   } else {
-    core.info(`Getting commits for ${releaseTag} only`);
-    // Just get the commits in this release
-    commits = await getCommitsInRelease(octokit, owner, repo, releaseTag);
+    // Fallback to getting commits from the current branch/ref
+    core.info(`Getting commits for current context: ${releaseName}`);
+    commits = await getCommitsInBranch(octokit, owner, repo, releaseName);
   }
-  
+
   core.info(`Found ${commits.length} commits in the release.`);
-  
+
   // Extract ClickUp task IDs from commit messages
   for (const commit of commits) {
     const message = commit.commit.message;
@@ -143,11 +176,11 @@ async function processRelease(eventPayload, githubToken, includePreviousRelease)
       taskIds.push(...idsFromCommit);
     }
   }
-  
+
   // Get merged PRs associated with these commits
   const mergedPRs = await getMergedPRsFromCommits(octokit, owner, repo, commits);
   core.info(`Found ${mergedPRs.length} merged PRs in the release.`);
-  
+
   // Extract ClickUp task IDs from PR titles and branch names
   for (const pr of mergedPRs) {
     // Extract from PR title
@@ -155,19 +188,19 @@ async function processRelease(eventPayload, githubToken, includePreviousRelease)
     if (idsFromTitle.length > 0) {
       taskIds.push(...idsFromTitle);
     }
-    
+
     // Extract from branch name
     const idsFromBranch = extractClickUpTaskIds(pr.head.ref);
     if (idsFromBranch.length > 0) {
       taskIds.push(...idsFromBranch);
     }
   }
-  
+
   // Remove duplicates
   taskIds = [...new Set(taskIds)];
-  
+
   core.info(`Found ${taskIds.length} unique ClickUp Task IDs: ${taskIds.join(', ')}`);
-  
+
   return taskIds;
 }
 

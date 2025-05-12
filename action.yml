@@ -18,6 +18,9 @@ inputs:
     description: 'Whether to include commits from the previous release to this one (true) or just this release (false)'
     required: false
     default: 'true'
+  release-name:
+    description: 'The name to use for the release tag. If not provided, will try to use branch name or release name from context.'
+    required: false
 
 runs:
   using: 'node20'
