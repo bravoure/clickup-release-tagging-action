@@ -1,0 +1,16 @@
+name: ClickUp Release Tagging
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  tag-clickup-tasks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: bravoure/clickup-release-tagging-action@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          clickup-api-key: ${{ secrets.CLICKUP_API_KEY }}
+          tag-prefix: "Release: "
+          include-previous-release: "true"
