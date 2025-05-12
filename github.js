@@ -79,12 +79,24 @@ async function getCommitsInRelease(octokit, owner, repo, tag) {
 // Function to get commits in a branch
 async function getCommitsInBranch(octokit, owner, repo, branchName, maxCommits = 100) {
   try {
+    core.info(`Fetching up to ${maxCommits} commits from branch: ${branchName}`);
+
     const { data: commits } = await octokit.rest.repos.listCommits({
       owner,
       repo,
       sha: branchName,
       per_page: maxCommits
     });
+
+    core.info(`Successfully fetched ${commits.length} commits from branch: ${branchName}`);
+
+    // Log some sample commit messages for debugging
+    if (commits.length > 0) {
+      core.info('Sample commit messages:');
+      for (let i = 0; i < Math.min(5, commits.length); i++) {
+        core.info(`  - ${commits[i].commit.message.split('\n')[0]}`);
+      }
+    }
 
     return commits;
   } catch (error) {
@@ -169,32 +181,52 @@ async function processRelease(eventPayload, githubToken, includePreviousRelease,
   core.info(`Found ${commits.length} commits in the release.`);
 
   // Extract ClickUp task IDs from commit messages
+  core.info('Extracting ClickUp task IDs from commit messages...');
+  let commitIdsCount = 0;
+
   for (const commit of commits) {
     const message = commit.commit.message;
     const idsFromCommit = extractClickUpTaskIds(message);
     if (idsFromCommit.length > 0) {
+      core.info(`Found ${idsFromCommit.length} ClickUp IDs in commit: ${message.split('\n')[0]}`);
       taskIds.push(...idsFromCommit);
+      commitIdsCount += idsFromCommit.length;
     }
   }
 
+  core.info(`Found ${commitIdsCount} ClickUp task IDs from commit messages.`);
+
   // Get merged PRs associated with these commits
+  core.info('Getting merged PRs associated with these commits...');
   const mergedPRs = await getMergedPRsFromCommits(octokit, owner, repo, commits);
   core.info(`Found ${mergedPRs.length} merged PRs in the release.`);
 
   // Extract ClickUp task IDs from PR titles and branch names
+  core.info('Extracting ClickUp task IDs from PR titles and branch names...');
+  let prTitleIdsCount = 0;
+  let branchIdsCount = 0;
+
   for (const pr of mergedPRs) {
     // Extract from PR title
     const idsFromTitle = extractClickUpTaskIds(pr.title);
     if (idsFromTitle.length > 0) {
+      core.info(`Found ${idsFromTitle.length} ClickUp IDs in PR title: ${pr.title}`);
       taskIds.push(...idsFromTitle);
+      prTitleIdsCount += idsFromTitle.length;
     }
 
     // Extract from branch name
     const idsFromBranch = extractClickUpTaskIds(pr.head.ref);
     if (idsFromBranch.length > 0) {
+      core.info(`Found ${idsFromBranch.length} ClickUp IDs in branch name: ${pr.head.ref}`);
       taskIds.push(...idsFromBranch);
+      branchIdsCount += idsFromBranch.length;
     }
   }
+
+  core.info(`Found ${prTitleIdsCount} ClickUp task IDs from PR titles.`);
+  core.info(`Found ${branchIdsCount} ClickUp task IDs from branch names.`);
+  core.info(`Found ${commitIdsCount + prTitleIdsCount + branchIdsCount} ClickUp task IDs in total before deduplication.`);
 
   // Remove duplicates
   taskIds = [...new Set(taskIds)];
